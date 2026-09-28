@@ -1,4 +1,3 @@
-import "dotenv/config";
 import makeWASocket, {
   Browsers,
   DisconnectReason,
@@ -90,7 +89,8 @@ Rules:
     );
 
     return (
-      "❌ Piyas AI বর্তমানে উত্তর দিতে পারছে না। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+      "❌ Piyas AI বর্তমানে উত্তর দিতে পারছে না।\n\n" +
+      "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
     );
   }
 }
@@ -110,6 +110,7 @@ const logger = P({
 const server =
   http.createServer(
     (req, res) => {
+
       res.writeHead(
         200,
         {
@@ -138,7 +139,9 @@ server.listen(
 ========================================================= */
 
 let sock = null;
+
 let reconnecting = false;
+
 let pairingRequested = false;
 
 /* =========================================================
@@ -146,6 +149,7 @@ let pairingRequested = false;
 ========================================================= */
 
 function getMessageText(message) {
+
   const msg =
     message?.message;
 
@@ -168,7 +172,9 @@ function getMessageText(message) {
 ========================================================= */
 
 async function isBotAdmin(groupId) {
+
   try {
+
     if (
       !sock ||
       !groupId?.endsWith("@g.us")
@@ -193,6 +199,7 @@ async function isBotAdmin(groupId) {
     const participant =
       participants.find(
         item => {
+
           const id =
             String(
               item?.id || ""
@@ -229,6 +236,7 @@ async function isBotAdmin(groupId) {
     );
 
   } catch (error) {
+
     console.log(
       "⚠️ Admin check error:",
       error?.message
@@ -239,11 +247,69 @@ async function isBotAdmin(groupId) {
 }
 
 /* =========================================================
+   SEND AI RESPONSE
+========================================================= */
+
+async function sendAIResponse(
+  remoteJid,
+  prompt
+) {
+
+  try {
+
+    await sock.sendMessage(
+      remoteJid,
+      {
+        text:
+          "🤖 *Piyas AI চিন্তা করছে...*"
+      }
+    );
+
+    const answer =
+      await askPiyasAI(
+        prompt
+      );
+
+    await sock.sendMessage(
+      remoteJid,
+      {
+        text:
+`╭━━━━━━━━━━━━━━━━━━━━╮
+        🤖 *PIYAS AI*
+╰━━━━━━━━━━━━━━━━━━━━╯
+
+${answer}
+
+━━━━━━━━━━━━━━━━━━━━
+🤍 *Piyas AI*`
+      }
+    );
+
+  } catch (error) {
+
+    console.log(
+      "❌ AI response error:",
+      error?.message
+    );
+
+    await sock.sendMessage(
+      remoteJid,
+      {
+        text:
+          "❌ AI উত্তর পাঠাতে সমস্যা হয়েছে।"
+      }
+    );
+  }
+}
+
+/* =========================================================
    START BOT
 ========================================================= */
 
 async function startBot() {
+
   try {
+
     const {
       state,
       saveCreds
@@ -254,6 +320,7 @@ async function startBot() {
 
     sock =
       makeWASocket({
+
         auth: state,
 
         logger,
@@ -273,6 +340,10 @@ async function startBot() {
           false
       });
 
+    /* =====================================================
+       SAVE CREDENTIALS
+    ===================================================== */
+
     sock.ev.on(
       "creds.update",
       saveCreds
@@ -285,16 +356,23 @@ async function startBot() {
     sock.ev.on(
       "connection.update",
       async update => {
+
         try {
+
           const {
             connection,
             lastDisconnect
           } = update;
 
+          /* ===============================================
+             CONNECTING
+          =============================================== */
+
           if (
             connection ===
             "connecting"
           ) {
+
             console.log(
               "🔄 Connecting to WhatsApp..."
             );
@@ -304,9 +382,12 @@ async function startBot() {
               !state.creds.registered &&
               !pairingRequested
             ) {
-              pairingRequested = true;
+
+              pairingRequested =
+                true;
 
               try {
+
                 await new Promise(
                   resolve =>
                     setTimeout(
@@ -337,6 +418,7 @@ async function startBot() {
                 );
 
               } catch (error) {
+
                 pairingRequested =
                   false;
 
@@ -348,10 +430,15 @@ async function startBot() {
             }
           }
 
+          /* ===============================================
+             OPEN
+          =============================================== */
+
           if (
             connection ===
             "open"
           ) {
+
             console.log(
               "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             );
@@ -365,17 +452,29 @@ async function startBot() {
             );
 
             console.log(
+              `🧠 AI Model: ${AI_MODEL}`
+            );
+
+            console.log(
               "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             );
 
-            reconnecting = false;
-            pairingRequested = false;
+            reconnecting =
+              false;
+
+            pairingRequested =
+              false;
           }
+
+          /* ===============================================
+             CLOSE
+          =============================================== */
 
           if (
             connection ===
             "close"
           ) {
+
             const statusCode =
               new Boom(
                 lastDisconnect?.error
@@ -390,21 +489,28 @@ async function startBot() {
               `❌ Connection closed. Code: ${statusCode}`
             );
 
-            sock = null;
-            pairingRequested = false;
+            sock =
+              null;
+
+            pairingRequested =
+              false;
 
             if (
               shouldReconnect &&
               !reconnecting
             ) {
-              reconnecting = true;
+
+              reconnecting =
+                true;
 
               setTimeout(
                 () => {
+
                   reconnecting =
                     false;
 
                   startBot();
+
                 },
                 5000
               );
@@ -412,6 +518,7 @@ async function startBot() {
           }
 
         } catch (error) {
+
           console.log(
             "❌ Connection update error:",
             error?.message
@@ -429,7 +536,9 @@ async function startBot() {
       async ({
         messages
       }) => {
+
         try {
+
           if (
             !Array.isArray(
               messages
@@ -441,7 +550,13 @@ async function startBot() {
           for (
             const message of messages
           ) {
+
             try {
+
+              /* =========================================
+                 BASIC CHECK
+              ========================================= */
+
               if (
                 !message ||
                 message.key?.fromMe
@@ -471,9 +586,9 @@ async function startBot() {
                 continue;
               }
 
-              /*
-               * Bot must be Admin
-               */
+              /* =========================================
+                 BOT ADMIN CHECK
+              ========================================= */
 
               const admin =
                 await isBotAdmin(
@@ -481,29 +596,38 @@ async function startBot() {
                 );
 
               if (!admin) {
+
+                console.log(
+                  `⚠️ Bot is not admin in ${remoteJid}`
+                );
+
                 continue;
               }
 
               const trimmed =
                 text.trim();
 
+              const lower =
+                trimmed.toLowerCase();
+
               /* =========================================
-                 /AI COMMAND
+                 /AI
               ========================================= */
 
               if (
-                trimmed
-                  .toLowerCase()
-                  .startsWith(
-                    "/ai"
-                  )
+                lower === "/ai" ||
+                lower.startsWith(
+                  "/ai "
+                )
               ) {
+
                 const prompt =
                   trimmed
                     .slice(3)
                     .trim();
 
                 if (!prompt) {
+
                   await sock.sendMessage(
                     remoteJid,
                     {
@@ -536,54 +660,32 @@ async function startBot() {
                   continue;
                 }
 
-                await sock.sendMessage(
+                await sendAIResponse(
                   remoteJid,
-                  {
-                    text:
-                      "🤖 *Piyas AI চিন্তা করছে...*"
-                  }
-                );
-
-                const answer =
-                  await askPiyasAI(
-                    prompt
-                  );
-
-                await sock.sendMessage(
-                  remoteJid,
-                  {
-                    text:
-`╭━━━━━━━━━━━━━━━━━━━━╮
-        🤖 *PIYAS AI*
-╰━━━━━━━━━━━━━━━━━━━━╯
-
-${answer}
-
-━━━━━━━━━━━━━━━━━━━━
-🤍 *Piyas AI*`
-                  }
+                  prompt
                 );
 
                 continue;
               }
 
               /* =========================================
-                 /ASK ALIAS
+                 /ASK
               ========================================= */
 
               if (
-                trimmed
-                  .toLowerCase()
-                  .startsWith(
-                    "/ask"
-                  )
+                lower === "/ask" ||
+                lower.startsWith(
+                  "/ask "
+                )
               ) {
+
                 const prompt =
                   trimmed
                     .slice(4)
                     .trim();
 
                 if (!prompt) {
+
                   await sock.sendMessage(
                     remoteJid,
                     {
@@ -595,18 +697,58 @@ ${answer}
                   continue;
                 }
 
-                const answer =
-                  await askPiyasAI(
-                    prompt
-                  );
+                await sendAIResponse(
+                  remoteJid,
+                  prompt
+                );
+
+                continue;
+              }
+
+              /* =========================================
+                 /PING
+              ========================================= */
+
+              if (
+                lower ===
+                "/ping"
+              ) {
 
                 await sock.sendMessage(
                   remoteJid,
                   {
                     text:
-`🤖 *PIYAS AI*
+                      "🏓 Pong!\n\n🤖 Piyas AI Bot is online."
+                  }
+                );
 
-${answer}`
+                continue;
+              }
+
+              /* =========================================
+                 /AISTATUS
+              ========================================= */
+
+              if (
+                lower ===
+                "/aistatus"
+              ) {
+
+                const status =
+                  geminiAI
+                    ? "✅ AI Ready"
+                    : "❌ AI API Key Missing";
+
+                await sock.sendMessage(
+                  remoteJid,
+                  {
+                    text:
+`🤖 *PIYAS AI STATUS*
+
+${status}
+
+🧠 Model:
+${AI_MODEL}`
                   }
                 );
 
@@ -614,6 +756,7 @@ ${answer}`
               }
 
             } catch (error) {
+
               console.log(
                 "⚠️ Message error:",
                 error?.message
@@ -622,6 +765,7 @@ ${answer}`
           }
 
         } catch (error) {
+
           console.log(
             "⚠️ Message handler error:",
             error?.message
@@ -635,20 +779,28 @@ ${answer}`
     );
 
   } catch (error) {
+
     console.log(
       "❌ Bot start error:",
       error?.message
     );
 
-    sock = null;
+    sock =
+      null;
 
     if (!reconnecting) {
-      reconnecting = true;
+
+      reconnecting =
+        true;
 
       setTimeout(
         () => {
-          reconnecting = false;
+
+          reconnecting =
+            false;
+
           startBot();
+
         },
         5000
       );
@@ -663,6 +815,7 @@ ${answer}`
 process.on(
   "uncaughtException",
   error => {
+
     console.log(
       "❌ Uncaught Exception:",
       error
@@ -673,6 +826,7 @@ process.on(
 process.on(
   "unhandledRejection",
   error => {
+
     console.log(
       "❌ Unhandled Rejection:",
       error
@@ -685,22 +839,28 @@ process.on(
 ========================================================= */
 
 async function shutdown() {
+
   console.log(
     "🛑 Shutting down..."
   );
 
   try {
+
     if (sock) {
+
       sock.end(
         new Error(
           "Bot shutting down"
         )
       );
     }
+
   } catch {}
 
   try {
+
     server.close();
+
   } catch {}
 
   process.exit(0);
