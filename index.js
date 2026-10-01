@@ -1,7 +1,8 @@
+সম্পূর্ণ নতুন "index.js"
+
+পুরোনো "index.js"-এর সব কোড মুছে নিচের কোডটি বসাও।
+
 import "dotenv/config";
-import http from "http";
-import fs from "fs";
-import pino from "pino";
 
 import makeWASocket, {
   Browsers,
@@ -9,35 +10,38 @@ import makeWASocket, {
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
 
+import P from "pino";
 import { Boom } from "@hapi/boom";
 import { GoogleGenAI } from "@google/genai";
+import http from "http";
+import fs from "fs";
 
-/* =============== CONFIGURATION =============== */
+/* =============== CONFIG =============== */
 
 const PORT = Number(process.env.PORT || 3000);
 const BOT_NAME = process.env.BOT_NAME || "Piyas AI Bot";
 const PREFIX = process.env.PREFIX || "/";
-const AI_MODEL = process.env.AI_MODEL || "gemini-2.5-flash-lite";
+const AI_MODEL =
+  process.env.AI_MODEL || "gemini-3.5-flash-lite";
+const PHONE_NUMBER = String(
+  process.env.PHONE_NUMBER || ""
+).replace(/\D/g, "").replace(/^0/, "880");
+
+const API_KEY = String(
+  process.env.GEMINI_API_KEY || ""
+).trim();
+
 const AUTH_DIR = "./auth_info";
+const logger = P({ level: "silent" });
 
-const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
-  .replace(/\D/g, "")
-  .replace(/^0/, "880");
-
-const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
-
-const logger = pino({ level: "silent" });
-
-if (!PHONE_NUMBER || !GEMINI_API_KEY) {
-  console.error("ERROR: Set PHONE_NUMBER and GEMINI_API_KEY.");
+if (!API_KEY) {
+  console.error("ERROR: GEMINI_API_KEY is missing!");
   process.exit(1);
 }
 
-const geminiAI = new GoogleGenAI({
-  apiKey: GEMINI_API_KEY
-});
+const ai = new GoogleGenAI({ apiKey: API_KEY });
 
-/* =============== HTTP SERVER =============== */
+/* =============== WEB SERVER =============== */
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, {
@@ -47,96 +51,155 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`HTTP server running on port ${PORT}`);
+  console.log(`${BOT_NAME} server listening on port ${PORT}`);
 });
 
 /* =============== AI INSTRUCTIONS =============== */
 
-const SYSTEM_PROMPT = `
+const SYSTEM_INSTRUCTION = `
 You are ${BOT_NAME}, a helpful WhatsApp AI assistant.
 
-Reply in the language used by the user.
-For Bengali messages, reply in Bengali.
-Answer questions and help with conversations, education, mathematics,
-translation, programming, social media posts, captions, stories, poems,
-and original song lyrics.
-Be respectful, clear, and helpful.
-Do not claim that you performed actions you did not perform.
-Do not reproduce copyrighted song lyrics on request.
+- Reply in the same language as the user's question.
+- Understand and reply naturally in Bengali and English.
+- Answer questions, explain topics, translate text,
+  write posts, captions, stories, poems and original lyrics.
+- Help with education, technology and programming.
+- Be friendly, respectful and accurate.
+- If unsure, clearly say so.
+- Do not reproduce copyrighted song lyrics on request.
 `;
 
+/* =============== GEMINI AI =============== */
+
 async function askAI(prompt) {
-  const result = await geminiAI.models.generateContent({
+  const result = await ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
-      systemInstruction: SYSTEM_PROMPT,
+      systemInstruction: SYSTEM_INSTRUCTION,
       temperature: 0.7,
       maxOutputTokens: 1500
     }
   });
 
-  const answer = String(result?.text || "").trim();
-
-  if (!answer) {
-    throw new Error("Gemini returned an empty response.");
-  }
-
-  return answer;
+  return String(result?.text || "").trim();
 }
 
-/* =============== BOT STATE =============== */
+/* =============== WHATSAPP STATE =============== */
 
 let activeSocket = null;
 let starting = false;
-let shuttingDown = false;
 let reconnectTimer = null;
-let pairingRequested = false;
-let connectionOpen = false;
-
-/* =============== RECONNECTION =============== */
+let shuttingDown = false;
 
 function scheduleReconnect() {
   if (shuttingDown || reconnectTimer) return;
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    void startBot();
+    startBot();
   }, 5000);
 }
 
-/* =============== WAIT FOR CONNECTION =============== */
+/* =============== MESSAGE HANDLER =============== */
 
-function waitForConnection(sock, timeoutMs = 300000) {
-  return new Promise((resolve) => {
-    let finished = false;
-    let timer;
+async function handleMessage(sock, msg) {
+  if (!msg?.message || msg.key?.fromMe) return;
 
-    const finish = (connected) => {
-      if (finished) return;
-      finished = true;
+  const jid = msg.key?.remoteJid;
 
-      clearTimeout(timer);
-      sock.ev.off("connection.update", onUpdate);
-      resolve(connected);
-    };
+  if (!jid || jid === "status@broadcast") return;
 
-    const onUpdate = (update) => {
-      if (update.connection === "open") finish(true);
-      if (update.connection === "close") finish(false);
-    };
+  // Extract text from supported WhatsApp message types.
+  const message = msg.message;
+  const text = String(
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
+    ""
+  ).trim();
 
-    if (activeSocket === sock && connectionOpen) {
-      resolve(true);
-      return;
+  if (!text) return;
+
+  // IMPORTANT:
+  // Ignore every message unless it starts with /ai.
+  // This applies to groups and private chats.
+  const command = `${PREFIX}ai`;
+  const lowerText = text.toLowerCase();
+  const lowerCommand = command.toLowerCase();
+
+  if (
+    lowerText !== lowerCommand &&
+    !lowerText.startsWith(lowerCommand + " ")
+  ) {
+    return;
+  }
+
+  // Extract the question after /ai.
+  const prompt = text.slice(command.length).trim();
+
+  if (!prompt) {
+    await sock.sendMessage(
+      jid,
+      {
+        text: `🤖 ${BOT_NAME}\n\nপ্রশ্ন করতে লিখো:\n${command} তোমার প্রশ্ন\n\nউদাহরণ:\n${command} বাংলাদেশের রাজধানী কী?`
+      },
+      { quoted: msg }
+    );
+    return;
+  }
+
+  console.log(`[AI REQUEST] ${jid}: ${prompt}`);
+
+  try {
+    await sock.sendPresenceUpdate("composing", jid);
+
+    const answer = await askAI(prompt);
+
+    if (!answer) {
+      throw new Error("Gemini returned an empty response.");
     }
 
-    timer = setTimeout(() => finish(false), timeoutMs);
-    sock.ev.on("connection.update", onUpdate);
-  });
+    // Avoid sending a reply if this socket was replaced.
+    if (activeSocket !== sock || shuttingDown) return;
+
+    await sock.sendMessage(
+      jid,
+      { text: answer },
+      { quoted: msg }
+    );
+
+    console.log(`[AI REPLIED] ${jid}`);
+
+  } catch (error) {
+    console.error(
+      "[GEMINI ERROR]",
+      error?.message || error
+    );
+
+    if (activeSocket === sock && !shuttingDown) {
+      await sock.sendMessage(
+        jid,
+        {
+          text:
+            "দুঃখিত, AI উত্তর তৈরি করতে পারেনি। " +
+            "কিছুক্ষণ পর আবার চেষ্টা করো।"
+        },
+        { quoted: msg }
+      ).catch(() => {});
+    }
+
+  } finally {
+    if (activeSocket === sock) {
+      await sock.sendPresenceUpdate("paused", jid)
+        .catch(() => {});
+    }
+  }
 }
 
-/* =============== START WHATSAPP =============== */
+/* =============== START BOT =============== */
 
 async function startBot() {
   if (starting || shuttingDown) return;
@@ -155,18 +218,12 @@ async function startBot() {
       browser: Browsers.ubuntu("Chrome"),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      syncFullHistory: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000
+      syncFullHistory: false
     });
 
     activeSocket = sock;
-    connectionOpen = false;
 
     sock.ev.on("creds.update", saveCreds);
-
-    /* =============== CONNECTION EVENTS =============== */
 
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect } = update;
@@ -176,20 +233,18 @@ async function startBot() {
       }
 
       if (connection === "open") {
-        connectionOpen = true;
         console.log(`${BOT_NAME} connected successfully!`);
         console.log(`AI model: ${AI_MODEL}`);
+        console.log("AI replies only to /ai questions.");
       }
 
       if (connection === "close") {
-        connectionOpen = false;
-
         const statusCode = lastDisconnect?.error
           ? new Boom(lastDisconnect.error).output?.statusCode
           : undefined;
 
-        console.log(
-          "WhatsApp connection closed. Status:",
+        console.error(
+          "WhatsApp connection closed:",
           statusCode ?? "unknown"
         );
 
@@ -197,210 +252,40 @@ async function startBot() {
           activeSocket = null;
         }
 
-        if (statusCode === DisconnectReason.loggedOut) {
+        if (
+          statusCode === DisconnectReason.loggedOut
+        ) {
           console.error(
-            "WhatsApp session logged out. Re-link the account manually."
+            "WhatsApp logged out. Re-link the device."
           );
-          return;
+        } else {
+          console.log("Reconnecting in 5 seconds...");
+          scheduleReconnect();
         }
-
-        console.log("Reconnecting in 5 seconds...");
-        scheduleReconnect();
       }
     });
 
-    /* =============== PAIRING CODE =============== */
-
-    if (!state.creds.registered && !pairingRequested) {
-      pairingRequested = true;
-
-      void (async () => {
-        try {
-          console.log("WhatsApp is not linked yet.");
-          console.log("Preparing one pairing code...");
-
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-
-          if (shuttingDown || activeSocket !== sock) return;
-          if (state.creds.registered) return;
-
-          const waitPromise = waitForConnection(sock, 300000);
-          const code = await sock.requestPairingCode(PHONE_NUMBER);
-
-          console.log("\n==============================");
-          console.log("WHATSAPP PAIRING CODE");
-          console.log("==============================");
-          console.log(code);
-          console.log("==============================");
-          console.log("WhatsApp > Linked Devices");
-          console.log("Link a device > Link with phone number");
-          console.log("Enter the code above.");
-          console.log("Waiting up to 5 minutes...");
-          console.log("==============================\n");
-
-          const connected = await waitPromise;
-
-          if (connected) {
-            console.log("WhatsApp linked successfully!");
-          } else {
-            console.log(
-              "Pairing was not completed or the connection closed."
-            );
-          }
-        } catch (error) {
-          console.error(
-            "Pairing error:",
-            error?.message || error
-          );
-        }
-      })();
-    }
-
-    /* =============== MESSAGE HANDLER =============== */
-
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    sock.ev.on("messages.upsert", ({ messages, type }) => {
       if (type !== "notify") return;
 
       for (const msg of messages) {
-        try {
-          if (!msg?.message) continue;
-
-          const jid = msg.key?.remoteJid;
-
-          if (!jid || jid === "status@broadcast") continue;
-          if (jid.endsWith("@newsletter")) continue;
-
-          // Unwrap common WhatsApp message wrappers.
-          let message = msg.message;
-
-          while (
-            message?.ephemeralMessage?.message ||
-            message?.viewOnceMessage?.message ||
-            message?.viewOnceMessageV2?.message ||
-            message?.documentWithCaptionMessage?.message
-          ) {
-            message =
-              message.ephemeralMessage?.message ||
-              message.viewOnceMessage?.message ||
-              message.viewOnceMessageV2?.message ||
-              message.documentWithCaptionMessage?.message;
-          }
-
-          const rawText =
-            message.conversation ||
-            message.extendedTextMessage?.text ||
-            message.imageMessage?.caption ||
-            message.videoMessage?.caption ||
-            message.documentMessage?.caption ||
-            "";
-
-          const text = String(rawText).trim();
-
-          if (!text) continue;
-
-          const lower = text.toLowerCase();
-          const aiCommand = `${PREFIX}ai`;
-          const askCommand = `${PREFIX}ask`;
-
-          const isAICommand =
-            lower === aiCommand.toLowerCase() ||
-            lower.startsWith(`${aiCommand} `.toLowerCase());
-
-          const isAskCommand =
-            lower === askCommand.toLowerCase() ||
-            lower.startsWith(`${askCommand} `.toLowerCase());
-
-          // Ignore our own ordinary messages to prevent reply loops.
-          // Explicit /ai and /ask commands can be used for self-testing.
-          if (msg.key?.fromMe && !isAICommand && !isAskCommand) {
-            continue;
-          }
-
-          if (
-            lower === `${PREFIX}help`.toLowerCase() ||
-            lower === `${PREFIX}menu`.toLowerCase()
-          ) {
-            await sock.sendMessage(
-              jid,
-              {
-                text:
-                  `🤖 *${BOT_NAME}*\n\n` +
-                  `${PREFIX}ai প্রশ্ন - AI-কে প্রশ্ন করো\n` +
-                  `${PREFIX}ask প্রশ্ন - AI-কে প্রশ্ন করো\n` +
-                  `${PREFIX}help - Help menu\n\n` +
-                  "সাধারণ টেক্সট মেসেজ দিয়েও কথা বলতে পারো।"
-              },
-              { quoted: msg }
-            );
-            continue;
-          }
-
-          let prompt = text;
-
-          if (isAICommand) {
-            prompt = text.slice(aiCommand.length).trim();
-          } else if (isAskCommand) {
-            prompt = text.slice(askCommand.length).trim();
-          }
-
-          if ((isAICommand || isAskCommand) && !prompt) {
-            await sock.sendMessage(
-              jid,
-              {
-                text: `প্রশ্ন লিখো। উদাহরণ: ${PREFIX}ai তুমি কে?`
-              },
-              { quoted: msg }
-            );
-            continue;
-          }
-
-          if (!prompt) continue;
-
-          console.log(
-            `[MESSAGE] ${jid} | ${msg.key?.fromMe ? "Own command" : "Incoming"}`
-          );
-          console.log(`[PROMPT] ${prompt.slice(0, 150)}`);
-
-          await sock.sendPresenceUpdate("composing", jid);
-
-          let answer;
-
-          try {
-            answer = await askAI(prompt);
-          } catch (error) {
-            console.error(
-              "[GEMINI ERROR]",
-              error?.message || error
-            );
-
-            answer =
-              "দুঃখিত, AI সেবা এখন কাজ করছে না। একটু পরে আবার চেষ্টা করো।";
-          }
-
-          await sock.sendMessage(
-            jid,
-            { text: String(answer).slice(0, 12000) },
-            { quoted: msg }
-          );
-
-          await sock.sendPresenceUpdate("paused", jid);
-
-          console.log(`[REPLIED] ${jid}`);
-        } catch (error) {
+        handleMessage(sock, msg).catch((error) => {
           console.error(
-            "[MESSAGE HANDLER ERROR]",
-            error?.stack || error?.message || error
+            "[MESSAGE ERROR]",
+            error?.message || error
           );
-        }
+        });
       }
     });
+
   } catch (error) {
     console.error(
-      "Bot startup error:",
-      error?.stack || error?.message || error
+      "[STARTUP ERROR]",
+      error?.message || error
     );
 
     scheduleReconnect();
+
   } finally {
     starting = false;
   }
@@ -408,11 +293,10 @@ async function startBot() {
 
 /* =============== SHUTDOWN =============== */
 
-async function shutdown(signal) {
+async function shutdown() {
   if (shuttingDown) return;
 
   shuttingDown = true;
-  console.log(`Received ${signal}. Shutting down...`);
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -422,25 +306,24 @@ async function shutdown(signal) {
   try {
     if (activeSocket) {
       activeSocket.end(undefined);
+      activeSocket = null;
     }
   } catch (error) {
     console.error("Shutdown error:", error?.message || error);
   }
 
   server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
+  setTimeout(() => process.exit(0), 3000);
 }
 
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 process.on("unhandledRejection", (error) => {
-  console.error("Unhandled rejection:", error);
+  console.error("[UNHANDLED]", error);
 });
-
-/* =============== RUN =============== */
 
 console.log(`Starting ${BOT_NAME}...`);
 console.log(`AI model: ${AI_MODEL}`);
 
-void startBot();
+startBot();
