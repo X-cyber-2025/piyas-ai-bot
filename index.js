@@ -1,7 +1,3 @@
-সম্পূর্ণ নতুন "index.js"
-
-পুরোনো "index.js"-এর সব কোড মুছে নিচের কোডটি বসাও।
-
 import "dotenv/config";
 
 import makeWASocket, {
