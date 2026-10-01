@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import http from "http";
 import fs from "fs";
@@ -17,7 +18,7 @@ import { GoogleGenAI } from "@google/genai";
 const PORT = Number(process.env.PORT || 3000);
 const BOT_NAME = process.env.BOT_NAME || "Piyas AI Bot";
 const PREFIX = process.env.PREFIX || "/";
-const AI_MODEL = process.env.AI_MODEL || "gemini-3.5-flash-lite";
+const AI_MODEL = process.env.AI_MODEL || "gemini-2.5-flash-lite";
 const AUTH_DIR = "./auth_info";
 
 const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
@@ -25,6 +26,8 @@ const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
   .replace(/^0/, "880");
 
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
+
+const logger = pino({ level: "silent" });
 
 if (!PHONE_NUMBER || !GEMINI_API_KEY) {
   console.error("ERROR: Set PHONE_NUMBER and GEMINI_API_KEY.");
@@ -34,8 +37,6 @@ if (!PHONE_NUMBER || !GEMINI_API_KEY) {
 const geminiAI = new GoogleGenAI({
   apiKey: GEMINI_API_KEY
 });
-
-const logger = pino({ level: "silent" });
 
 /* =============== HTTP SERVER =============== */
 
@@ -56,7 +57,7 @@ const SYSTEM_PROMPT = `
 You are ${BOT_NAME}, a helpful WhatsApp AI assistant.
 
 Reply in the same language as the user.
-If the user writes Bengali, reply in Bengali.
+Reply in Bengali when the user writes Bengali.
 Help with questions, education, mathematics, translation,
 programming, social media posts, captions, stories, poems,
 and original song lyrics.
@@ -92,7 +93,6 @@ let starting = false;
 let shuttingDown = false;
 let reconnectTimer = null;
 let pairingRequested = false;
-let connectionOpen = false;
 
 /* =============== RECONNECTION =============== */
 
@@ -131,8 +131,6 @@ async function startBot() {
     });
 
     activeSocket = sock;
-    connectionOpen = false;
-
     sock.ev.on("creds.update", saveCreds);
 
     /* =============== CONNECTION EVENTS =============== */
@@ -145,14 +143,11 @@ async function startBot() {
       }
 
       if (connection === "open") {
-        connectionOpen = true;
         console.log(`${BOT_NAME} connected successfully!`);
         console.log(`AI model: ${AI_MODEL}`);
       }
 
       if (connection === "close") {
-        connectionOpen = false;
-
         const statusCode = lastDisconnect?.error
           ? new Boom(lastDisconnect.error).output?.statusCode
           : undefined;
@@ -185,7 +180,6 @@ async function startBot() {
 
       void (async () => {
         try {
-          console.log("WhatsApp is not linked yet.");
           await new Promise(resolve => setTimeout(resolve, 3000));
 
           if (shuttingDown || activeSocket !== sock) return;
@@ -202,7 +196,10 @@ async function startBot() {
           console.log("Enter the code above.");
           console.log("==============================\n");
         } catch (error) {
-          console.error("Pairing error:", error?.message || error);
+          console.error(
+            "Pairing error:",
+            error?.message || "Unknown error"
+          );
         }
       })();
     }
@@ -211,22 +208,19 @@ async function startBot() {
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
       if (type !== "notify") return;
+      if (activeSocket !== sock) return;
 
       for (const msg of messages) {
         try {
-          if (!msg?.message) continue;
+          if (!msg?.message || msg.key?.fromMe) continue;
 
           const jid = msg.key?.remoteJid;
 
           if (!jid || jid === "status@broadcast") continue;
           if (jid.endsWith("@newsletter")) continue;
 
-          // Ignore messages sent by the bot itself.
-          if (msg.key?.fromMe) continue;
-
           let message = msg.message;
 
-          // Unwrap supported WhatsApp message wrappers.
           while (
             message?.ephemeralMessage?.message ||
             message?.viewOnceMessage?.message ||
@@ -252,25 +246,36 @@ async function startBot() {
 
           if (!text) continue;
 
-          const prefixCommand = `${PREFIX}ai`;
           const lowerText = text.toLowerCase();
-          const lowerCommand = prefixCommand.toLowerCase();
+          const aiCommand = `${PREFIX}ai`;
+          const askCommand = `${PREFIX}ask`;
 
-          // Only messages starting with "/ai " can trigger the AI.
-          if (
-            lowerText !== lowerCommand &&
-            !lowerText.startsWith(lowerCommand + " ")
-          ) {
-            continue;
-          }
+          const isAICommand =
+            lowerText === aiCommand.toLowerCase() ||
+            lowerText.startsWith(
+              `${aiCommand} `.toLowerCase()
+            );
 
-          const prompt = text.slice(prefixCommand.length).trim();
+          const isAskCommand =
+            lowerText === askCommand.toLowerCase() ||
+            lowerText.startsWith(
+              `${askCommand} `.toLowerCase()
+            );
+
+          // Ignore every message that does not use an AI command.
+          if (!isAICommand && !isAskCommand) continue;
+
+          const command = isAICommand ? aiCommand : askCommand;
+          const prompt = text.slice(command.length).trim();
 
           if (!prompt) {
             await sock.sendMessage(
               jid,
               {
-                text: `প্রশ্ন লিখো। উদাহরণ: ${PREFIX}ai তুমি কে?`
+                text:
+                  `প্রশ্ন লিখো।\n\n` +
+                  `উদাহরণ: ${PREFIX}ai তুমি কে?\n` +
+                  `অথবা: ${PREFIX}ask বাংলাদেশের রাজধানী কী?`
               },
               { quoted: msg }
             );
@@ -278,8 +283,6 @@ async function startBot() {
           }
 
           console.log(`[AI REQUEST] ${jid}`);
-          console.log(`[PROMPT] ${prompt.slice(0, 150)}`);
-
           await sock.sendPresenceUpdate("composing", jid);
 
           let answer;
@@ -289,12 +292,15 @@ async function startBot() {
           } catch (error) {
             console.error(
               "[GEMINI ERROR]",
-              error?.message || error
+              error?.message || "Unknown error"
             );
 
             answer =
-              "দুঃখিত, AI সেবা এখন কাজ করছে না। কিছুক্ষণ পরে আবার চেষ্টা করো।";
+              "দুঃখিত, AI সেবা এখন কাজ করছে না। " +
+              "কিছুক্ষণ পরে আবার চেষ্টা করো।";
           }
+
+          if (activeSocket !== sock) continue;
 
           await sock.sendMessage(
             jid,
@@ -303,13 +309,12 @@ async function startBot() {
           );
 
           await sock.sendPresenceUpdate("paused", jid);
-
           console.log(`[AI REPLIED] ${jid}`);
 
         } catch (error) {
           console.error(
             "[MESSAGE HANDLER ERROR]",
-            error?.stack || error?.message || error
+            error?.message || error
           );
         }
       }
@@ -318,9 +323,8 @@ async function startBot() {
   } catch (error) {
     console.error(
       "Bot startup error:",
-      error?.stack || error?.message || error
+      error?.message || error
     );
-
     scheduleReconnect();
   } finally {
     starting = false;
@@ -343,6 +347,7 @@ async function shutdown(signal) {
   try {
     if (activeSocket) {
       activeSocket.end(undefined);
+      activeSocket = null;
     }
   } catch (error) {
     console.error("Shutdown error:", error?.message || error);
@@ -355,8 +360,11 @@ async function shutdown(signal) {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-process.on("unhandledRejection", error => {
-  console.error("Unhandled rejection:", error);
+process.on("unhandledRejection", (error) => {
+  console.error(
+    "Unhandled rejection:",
+    error?.message || error
+  );
 });
 
 /* =============== RUN =============== */
