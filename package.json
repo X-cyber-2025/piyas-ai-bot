@@ -1,7 +1,8 @@
 {
   "name": "piyas-ai-bot",
   "version": "1.0.0",
-  "description": "Piyas AI WhatsApp Bot",
+  "private": true,
+  "description": "Piyas AI WhatsApp Assistant",
   "type": "module",
   "scripts": {
     "start": "node index.js"
