@@ -1,0 +1,15 @@
+{
+  "name": "piyas-ai-bot",
+  "version": "1.0.0",
+  "description": "Piyas AI WhatsApp Bot",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "@hapi/boom": "10.0.1",
+    "dotenv": "^16.4.7",
+    "pino": "^9.0.0"
+  }
+}
