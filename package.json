@@ -9,6 +9,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "@hapi/boom": "10.0.1",
+    "@google/genai": "^1.0.0",
     "dotenv": "^16.4.7",
     "pino": "^9.0.0"
   }
