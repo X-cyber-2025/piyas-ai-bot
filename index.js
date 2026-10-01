@@ -17,7 +17,7 @@ import { GoogleGenAI } from "@google/genai";
 const PORT = Number(process.env.PORT || 3000);
 const BOT_NAME = process.env.BOT_NAME || "Piyas AI Bot";
 const PREFIX = process.env.PREFIX || "/";
-const AI_MODEL = process.env.AI_MODEL || "gemini-2.5-flash-lite";
+const AI_MODEL = process.env.AI_MODEL || "gemini-3.5-flash-lite";
 const AUTH_DIR = "./auth_info";
 
 const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
@@ -25,8 +25,6 @@ const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
   .replace(/^0/, "880");
 
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
-
-const logger = pino({ level: "silent" });
 
 if (!PHONE_NUMBER || !GEMINI_API_KEY) {
   console.error("ERROR: Set PHONE_NUMBER and GEMINI_API_KEY.");
@@ -36,6 +34,8 @@ if (!PHONE_NUMBER || !GEMINI_API_KEY) {
 const geminiAI = new GoogleGenAI({
   apiKey: GEMINI_API_KEY
 });
+
+const logger = pino({ level: "silent" });
 
 /* =============== HTTP SERVER =============== */
 
@@ -47,7 +47,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`HTTP server running on port ${PORT}`);
+  console.log(`${BOT_NAME} server listening on port ${PORT}`);
 });
 
 /* =============== AI INSTRUCTIONS =============== */
@@ -55,13 +55,13 @@ server.listen(PORT, "0.0.0.0", () => {
 const SYSTEM_PROMPT = `
 You are ${BOT_NAME}, a helpful WhatsApp AI assistant.
 
-Reply in the language used by the user.
-For Bengali messages, reply in Bengali.
-Answer questions and help with conversations, education, mathematics,
-translation, programming, social media posts, captions, stories, poems,
+Reply in the same language as the user.
+If the user writes Bengali, reply in Bengali.
+Help with questions, education, mathematics, translation,
+programming, social media posts, captions, stories, poems,
 and original song lyrics.
 Be respectful, clear, and helpful.
-Do not claim that you performed actions you did not perform.
+Do not claim to perform actions you did not perform.
 Do not reproduce copyrighted song lyrics on request.
 `;
 
@@ -103,37 +103,6 @@ function scheduleReconnect() {
     reconnectTimer = null;
     void startBot();
   }, 5000);
-}
-
-/* =============== WAIT FOR CONNECTION =============== */
-
-function waitForConnection(sock, timeoutMs = 300000) {
-  return new Promise((resolve) => {
-    let finished = false;
-    let timer;
-
-    const finish = (connected) => {
-      if (finished) return;
-      finished = true;
-
-      clearTimeout(timer);
-      sock.ev.off("connection.update", onUpdate);
-      resolve(connected);
-    };
-
-    const onUpdate = (update) => {
-      if (update.connection === "open") finish(true);
-      if (update.connection === "close") finish(false);
-    };
-
-    if (activeSocket === sock && connectionOpen) {
-      resolve(true);
-      return;
-    }
-
-    timer = setTimeout(() => finish(false), timeoutMs);
-    sock.ev.on("connection.update", onUpdate);
-  });
 }
 
 /* =============== START WHATSAPP =============== */
@@ -199,7 +168,7 @@ async function startBot() {
 
         if (statusCode === DisconnectReason.loggedOut) {
           console.error(
-            "WhatsApp session logged out. Re-link the account manually."
+            "WhatsApp logged out. Relink the account manually."
           );
           return;
         }
@@ -217,41 +186,23 @@ async function startBot() {
       void (async () => {
         try {
           console.log("WhatsApp is not linked yet.");
-          console.log("Preparing one pairing code...");
-
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          await new Promise(resolve => setTimeout(resolve, 3000));
 
           if (shuttingDown || activeSocket !== sock) return;
           if (state.creds.registered) return;
 
-          const waitPromise = waitForConnection(sock, 300000);
           const code = await sock.requestPairingCode(PHONE_NUMBER);
 
           console.log("\n==============================");
           console.log("WHATSAPP PAIRING CODE");
-          console.log("==============================");
           console.log(code);
           console.log("==============================");
           console.log("WhatsApp > Linked Devices");
           console.log("Link a device > Link with phone number");
           console.log("Enter the code above.");
-          console.log("Waiting up to 5 minutes...");
           console.log("==============================\n");
-
-          const connected = await waitPromise;
-
-          if (connected) {
-            console.log("WhatsApp linked successfully!");
-          } else {
-            console.log(
-              "Pairing was not completed or the connection closed."
-            );
-          }
         } catch (error) {
-          console.error(
-            "Pairing error:",
-            error?.message || error
-          );
+          console.error("Pairing error:", error?.message || error);
         }
       })();
     }
@@ -270,9 +221,12 @@ async function startBot() {
           if (!jid || jid === "status@broadcast") continue;
           if (jid.endsWith("@newsletter")) continue;
 
-          // Unwrap common WhatsApp message wrappers.
+          // Ignore messages sent by the bot itself.
+          if (msg.key?.fromMe) continue;
+
           let message = msg.message;
 
+          // Unwrap supported WhatsApp message wrappers.
           while (
             message?.ephemeralMessage?.message ||
             message?.viewOnceMessage?.message ||
@@ -298,52 +252,21 @@ async function startBot() {
 
           if (!text) continue;
 
-          const lower = text.toLowerCase();
-          const aiCommand = `${PREFIX}ai`;
-          const askCommand = `${PREFIX}ask`;
+          const prefixCommand = `${PREFIX}ai`;
+          const lowerText = text.toLowerCase();
+          const lowerCommand = prefixCommand.toLowerCase();
 
-          const isAICommand =
-            lower === aiCommand.toLowerCase() ||
-            lower.startsWith(`${aiCommand} `.toLowerCase());
-
-          const isAskCommand =
-            lower === askCommand.toLowerCase() ||
-            lower.startsWith(`${askCommand} `.toLowerCase());
-
-          // Ignore our own ordinary messages to prevent reply loops.
-          // Explicit /ai and /ask commands can be used for self-testing.
-          if (msg.key?.fromMe && !isAICommand && !isAskCommand) {
-            continue;
-          }
-
+          // Only messages starting with "/ai " can trigger the AI.
           if (
-            lower === `${PREFIX}help`.toLowerCase() ||
-            lower === `${PREFIX}menu`.toLowerCase()
+            lowerText !== lowerCommand &&
+            !lowerText.startsWith(lowerCommand + " ")
           ) {
-            await sock.sendMessage(
-              jid,
-              {
-                text:
-                  `🤖 *${BOT_NAME}*\n\n` +
-                  `${PREFIX}ai প্রশ্ন - AI-কে প্রশ্ন করো\n` +
-                  `${PREFIX}ask প্রশ্ন - AI-কে প্রশ্ন করো\n` +
-                  `${PREFIX}help - Help menu\n\n` +
-                  "সাধারণ টেক্সট মেসেজ দিয়েও কথা বলতে পারো।"
-              },
-              { quoted: msg }
-            );
             continue;
           }
 
-          let prompt = text;
+          const prompt = text.slice(prefixCommand.length).trim();
 
-          if (isAICommand) {
-            prompt = text.slice(aiCommand.length).trim();
-          } else if (isAskCommand) {
-            prompt = text.slice(askCommand.length).trim();
-          }
-
-          if ((isAICommand || isAskCommand) && !prompt) {
+          if (!prompt) {
             await sock.sendMessage(
               jid,
               {
@@ -354,11 +277,7 @@ async function startBot() {
             continue;
           }
 
-          if (!prompt) continue;
-
-          console.log(
-            `[MESSAGE] ${jid} | ${msg.key?.fromMe ? "Own command" : "Incoming"}`
-          );
+          console.log(`[AI REQUEST] ${jid}`);
           console.log(`[PROMPT] ${prompt.slice(0, 150)}`);
 
           await sock.sendPresenceUpdate("composing", jid);
@@ -374,7 +293,7 @@ async function startBot() {
             );
 
             answer =
-              "দুঃখিত, AI সেবা এখন কাজ করছে না। একটু পরে আবার চেষ্টা করো।";
+              "দুঃখিত, AI সেবা এখন কাজ করছে না। কিছুক্ষণ পরে আবার চেষ্টা করো।";
           }
 
           await sock.sendMessage(
@@ -385,7 +304,8 @@ async function startBot() {
 
           await sock.sendPresenceUpdate("paused", jid);
 
-          console.log(`[REPLIED] ${jid}`);
+          console.log(`[AI REPLIED] ${jid}`);
+
         } catch (error) {
           console.error(
             "[MESSAGE HANDLER ERROR]",
@@ -394,6 +314,7 @@ async function startBot() {
         }
       }
     });
+
   } catch (error) {
     console.error(
       "Bot startup error:",
@@ -434,7 +355,7 @@ async function shutdown(signal) {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-process.on("unhandledRejection", (error) => {
+process.on("unhandledRejection", error => {
   console.error("Unhandled rejection:", error);
 });
 
