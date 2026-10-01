@@ -18,48 +18,51 @@ const PORT = Number(process.env.PORT || 3000);
 const BOT_NAME = process.env.BOT_NAME || "Piyas AI Bot";
 const PREFIX = process.env.PREFIX || "/";
 const AI_MODEL = process.env.AI_MODEL || "gemini-2.5-flash-lite";
+const AUTH_DIR = "./auth_info";
 
 const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
   .replace(/\D/g, "")
   .replace(/^0/, "880");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const AUTH_DIR = "./auth_info";
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
 
 const logger = pino({ level: "silent" });
 
-/* =============== VALIDATION =============== */
-
-if (!PHONE_NUMBER) {
-  console.error("ERROR: PHONE_NUMBER is missing.");
+if (!PHONE_NUMBER || !GEMINI_API_KEY) {
+  console.error("ERROR: Set PHONE_NUMBER and GEMINI_API_KEY.");
   process.exit(1);
 }
-
-if (!GEMINI_API_KEY) {
-  console.error("ERROR: GEMINI_API_KEY is missing.");
-  process.exit(1);
-}
-
-if (!fs.existsSync(AUTH_DIR)) {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
-}
-
-/* =============== GEMINI AI =============== */
 
 const geminiAI = new GoogleGenAI({
   apiKey: GEMINI_API_KEY
 });
 
+/* =============== HTTP SERVER =============== */
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/plain; charset=utf-8"
+  });
+  res.end(`${BOT_NAME} is running.`);
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`HTTP server running on port ${PORT}`);
+});
+
+/* =============== AI INSTRUCTIONS =============== */
+
 const SYSTEM_PROMPT = `
 You are ${BOT_NAME}, a helpful WhatsApp AI assistant.
 
-Respond in the same language as the user's message.
-Be polite, clear, and useful.
-Help with questions, explanations, coding, captions, social media posts,
-stories, poems, original song lyrics, translations, and brainstorming.
-For coding requests, provide complete and valid code when appropriate.
-Never claim that you performed an action you did not perform.
-If you do not know an answer, say so honestly.
+Reply in the language used by the user.
+For Bengali messages, reply in Bengali.
+Answer questions and help with conversations, education, mathematics,
+translation, programming, social media posts, captions, stories, poems,
+and original song lyrics.
+Be respectful, clear, and helpful.
+Do not claim that you performed actions you did not perform.
+Do not reproduce copyrighted song lyrics on request.
 `;
 
 async function askAI(prompt) {
@@ -73,86 +76,67 @@ async function askAI(prompt) {
     }
   });
 
-  const answer = result.text;
+  const answer = String(result?.text || "").trim();
 
-  if (!answer || !answer.trim()) {
-    return "দুঃখিত, AI থেকে কোনো উত্তর পাওয়া যায়নি। আবার চেষ্টা করো।";
+  if (!answer) {
+    throw new Error("Gemini returned an empty response.");
   }
 
-  return answer.trim();
+  return answer;
 }
-
-/* =============== HTTP SERVER =============== */
-
-const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8"
-  });
-
-  res.end(`${BOT_NAME} is running.`);
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`${BOT_NAME} server listening on port ${PORT}`);
-});
 
 /* =============== BOT STATE =============== */
 
 let activeSocket = null;
 let starting = false;
+let shuttingDown = false;
 let reconnectTimer = null;
 let pairingRequested = false;
-let shuttingDown = false;
 let connectionOpen = false;
 
-/* =============== CONNECTION WAIT =============== */
-
-function waitForWhatsAppConnection(sock, timeoutMs = 300000) {
-  return new Promise((resolve) => {
-    let finished = false;
-
-    const finish = (connected) => {
-      if (finished) return;
-
-      finished = true;
-      clearTimeout(timer);
-      sock.ev.off("connection.update", onUpdate);
-      resolve(connected);
-    };
-
-    const onUpdate = (update) => {
-      if (update.connection === "open") {
-        finish(true);
-      } else if (update.connection === "close") {
-        finish(false);
-      }
-    };
-
-    if (connectionOpen && activeSocket === sock) {
-      resolve(true);
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      finish(false);
-    }, timeoutMs);
-
-    sock.ev.on("connection.update", onUpdate);
-  });
-}
-
-/* =============== RECONNECT =============== */
+/* =============== RECONNECTION =============== */
 
 function scheduleReconnect() {
   if (shuttingDown || reconnectTimer) return;
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    startBot();
+    void startBot();
   }, 5000);
 }
 
-/* =============== START BOT =============== */
+/* =============== WAIT FOR CONNECTION =============== */
+
+function waitForConnection(sock, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer;
+
+    const finish = (connected) => {
+      if (finished) return;
+      finished = true;
+
+      clearTimeout(timer);
+      sock.ev.off("connection.update", onUpdate);
+      resolve(connected);
+    };
+
+    const onUpdate = (update) => {
+      if (update.connection === "open") finish(true);
+      if (update.connection === "close") finish(false);
+    };
+
+    if (activeSocket === sock && connectionOpen) {
+      resolve(true);
+      return;
+    }
+
+    timer = setTimeout(() => finish(false), timeoutMs);
+    sock.ev.on("connection.update", onUpdate);
+  });
+}
+
+/* =============== START WHATSAPP =============== */
 
 async function startBot() {
   if (starting || shuttingDown) return;
@@ -160,13 +144,15 @@ async function startBot() {
   starting = true;
 
   try {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+
     const { state, saveCreds } =
       await useMultiFileAuthState(AUTH_DIR);
 
     const sock = makeWASocket({
       auth: state,
       logger,
-      browser: Browsers.ubuntu(BOT_NAME),
+      browser: Browsers.ubuntu("Chrome"),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       syncFullHistory: false,
@@ -192,14 +178,15 @@ async function startBot() {
       if (connection === "open") {
         connectionOpen = true;
         console.log(`${BOT_NAME} connected successfully!`);
+        console.log(`AI model: ${AI_MODEL}`);
       }
 
       if (connection === "close") {
         connectionOpen = false;
 
-        const statusCode = new Boom(
-          lastDisconnect?.error
-        ).output?.statusCode;
+        const statusCode = lastDisconnect?.error
+          ? new Boom(lastDisconnect.error).output?.statusCode
+          : undefined;
 
         console.log(
           "WhatsApp connection closed. Status:",
@@ -211,12 +198,13 @@ async function startBot() {
         }
 
         if (statusCode === DisconnectReason.loggedOut) {
-          console.log(
-            "Session logged out. Re-link WhatsApp before restarting."
+          console.error(
+            "WhatsApp session logged out. Re-link the account manually."
           );
           return;
         }
 
+        console.log("Reconnecting in 5 seconds...");
         scheduleReconnect();
       }
     });
@@ -226,49 +214,42 @@ async function startBot() {
     if (!state.creds.registered && !pairingRequested) {
       pairingRequested = true;
 
-      (async () => {
+      void (async () => {
         try {
-          console.log("Waiting for WhatsApp socket initialization...");
+          console.log("WhatsApp is not linked yet.");
+          console.log("Preparing one pairing code...");
+
           await new Promise((resolve) => setTimeout(resolve, 3000));
 
           if (shuttingDown || activeSocket !== sock) return;
+          if (state.creds.registered) return;
 
-          if (state.creds.registered) {
-            console.log("WhatsApp is already registered.");
-            return;
-          }
-
-          const connectionWait = waitForWhatsAppConnection(
-            sock,
-            5 * 60 * 1000
-          );
-
+          const waitPromise = waitForConnection(sock, 300000);
           const code = await sock.requestPairingCode(PHONE_NUMBER);
 
-          console.log("\n================================");
+          console.log("\n==============================");
           console.log("WHATSAPP PAIRING CODE");
-          console.log("================================");
+          console.log("==============================");
           console.log(code);
-          console.log("================================");
-          console.log("Open WhatsApp > Linked Devices");
-          console.log("Choose Link a device > Link with phone number");
-          console.log("Enter the code displayed above.");
-          console.log("Waiting up to 5 minutes for connection...");
-          console.log("================================\n");
+          console.log("==============================");
+          console.log("WhatsApp > Linked Devices");
+          console.log("Link a device > Link with phone number");
+          console.log("Enter the code above.");
+          console.log("Waiting up to 5 minutes...");
+          console.log("==============================\n");
 
-          const connected = await connectionWait;
+          const connected = await waitPromise;
 
           if (connected) {
             console.log("WhatsApp linked successfully!");
           } else {
             console.log(
-              "Connection did not complete within the waiting period, " +
-              "or WhatsApp disconnected. Check the logs."
+              "Pairing was not completed or the connection closed."
             );
           }
         } catch (error) {
           console.error(
-            "Pairing failed:",
+            "Pairing error:",
             error?.message || error
           );
         }
@@ -282,17 +263,30 @@ async function startBot() {
 
       for (const msg of messages) {
         try {
-          if (!msg.message) continue;
-          if (msg.key.fromMe) continue;
+          if (!msg?.message) continue;
 
-          const jid = msg.key.remoteJid;
+          const jid = msg.key?.remoteJid;
 
           if (!jid || jid === "status@broadcast") continue;
           if (jid.endsWith("@newsletter")) continue;
 
-          const message = msg.message;
+          // Unwrap common WhatsApp message wrappers.
+          let message = msg.message;
 
-          const textMessage =
+          while (
+            message?.ephemeralMessage?.message ||
+            message?.viewOnceMessage?.message ||
+            message?.viewOnceMessageV2?.message ||
+            message?.documentWithCaptionMessage?.message
+          ) {
+            message =
+              message.ephemeralMessage?.message ||
+              message.viewOnceMessage?.message ||
+              message.viewOnceMessageV2?.message ||
+              message.documentWithCaptionMessage?.message;
+          }
+
+          const rawText =
             message.conversation ||
             message.extendedTextMessage?.text ||
             message.imageMessage?.caption ||
@@ -300,97 +294,110 @@ async function startBot() {
             message.documentMessage?.caption ||
             "";
 
-          const text = textMessage.trim();
+          const text = String(rawText).trim();
 
           if (!text) continue;
 
-          const commandText = text.toLowerCase();
+          const lower = text.toLowerCase();
+          const aiCommand = `${PREFIX}ai`;
+          const askCommand = `${PREFIX}ask`;
 
-          /* Help command */
+          const isAICommand =
+            lower === aiCommand.toLowerCase() ||
+            lower.startsWith(`${aiCommand} `.toLowerCase());
 
-          if (
-            commandText === `${PREFIX}menu` ||
-            commandText === `${PREFIX}help`
-          ) {
-            const menu = [
-              `🤖 *${BOT_NAME}*`,
-              "",
-              `${PREFIX}ai <question> - Ask AI`,
-              `${PREFIX}ask <question> - Ask AI`,
-              `${PREFIX}help - Show this menu`,
-              "",
-              "You can also send a normal text message to chat with AI."
-            ].join("\n");
+          const isAskCommand =
+            lower === askCommand.toLowerCase() ||
+            lower.startsWith(`${askCommand} `.toLowerCase());
 
-            await sock.sendMessage(
-              jid,
-              { text: menu },
-              { quoted: msg }
-            );
-
+          // Ignore our own ordinary messages to prevent reply loops.
+          // Explicit /ai and /ask commands can be used for self-testing.
+          if (msg.key?.fromMe && !isAICommand && !isAskCommand) {
             continue;
           }
 
-          /* AI commands */
-
-          let prompt = text;
-
-          if (text.startsWith(`${PREFIX}ai `)) {
-            prompt = text.slice(`${PREFIX}ai `.length).trim();
-          } else if (text.startsWith(`${PREFIX}ask `)) {
-            prompt = text.slice(`${PREFIX}ask `.length).trim();
-          } else if (
-            text === `${PREFIX}ai` ||
-            text === `${PREFIX}ask`
+          if (
+            lower === `${PREFIX}help`.toLowerCase() ||
+            lower === `${PREFIX}menu`.toLowerCase()
           ) {
             await sock.sendMessage(
               jid,
               {
-                text: `প্রশ্ন লিখো। উদাহরণ: ${PREFIX}ai বাংলাদেশের রাজধানী কী?`
+                text:
+                  `🤖 *${BOT_NAME}*\n\n` +
+                  `${PREFIX}ai প্রশ্ন - AI-কে প্রশ্ন করো\n` +
+                  `${PREFIX}ask প্রশ্ন - AI-কে প্রশ্ন করো\n` +
+                  `${PREFIX}help - Help menu\n\n` +
+                  "সাধারণ টেক্সট মেসেজ দিয়েও কথা বলতে পারো।"
               },
               { quoted: msg }
             );
+            continue;
+          }
 
+          let prompt = text;
+
+          if (isAICommand) {
+            prompt = text.slice(aiCommand.length).trim();
+          } else if (isAskCommand) {
+            prompt = text.slice(askCommand.length).trim();
+          }
+
+          if ((isAICommand || isAskCommand) && !prompt) {
+            await sock.sendMessage(
+              jid,
+              {
+                text: `প্রশ্ন লিখো। উদাহরণ: ${PREFIX}ai তুমি কে?`
+              },
+              { quoted: msg }
+            );
             continue;
           }
 
           if (!prompt) continue;
 
+          console.log(
+            `[MESSAGE] ${jid} | ${msg.key?.fromMe ? "Own command" : "Incoming"}`
+          );
+          console.log(`[PROMPT] ${prompt.slice(0, 150)}`);
+
           await sock.sendPresenceUpdate("composing", jid);
 
-          const answer = await askAI(prompt);
+          let answer;
+
+          try {
+            answer = await askAI(prompt);
+          } catch (error) {
+            console.error(
+              "[GEMINI ERROR]",
+              error?.message || error
+            );
+
+            answer =
+              "দুঃখিত, AI সেবা এখন কাজ করছে না। একটু পরে আবার চেষ্টা করো।";
+          }
 
           await sock.sendMessage(
             jid,
-            { text: answer },
+            { text: String(answer).slice(0, 12000) },
             { quoted: msg }
           );
 
           await sock.sendPresenceUpdate("paused", jid);
+
+          console.log(`[REPLIED] ${jid}`);
         } catch (error) {
           console.error(
-            "Message handling error:",
-            error?.message || error
+            "[MESSAGE HANDLER ERROR]",
+            error?.stack || error?.message || error
           );
-
-          try {
-            await sock.sendMessage(
-              msg.key.remoteJid,
-              {
-                text: "দুঃখিত, এই মুহূর্তে উত্তর দিতে সমস্যা হচ্ছে। একটু পরে আবার চেষ্টা করো।"
-              },
-              { quoted: msg }
-            );
-          } catch {
-            // The message may not be deliverable if WhatsApp disconnected.
-          }
         }
       }
     });
   } catch (error) {
     console.error(
       "Bot startup error:",
-      error?.message || error
+      error?.stack || error?.message || error
     );
 
     scheduleReconnect();
@@ -417,19 +424,23 @@ async function shutdown(signal) {
       activeSocket.end(undefined);
     }
   } catch (error) {
-    console.error("Socket shutdown error:", error?.message || error);
+    console.error("Shutdown error:", error?.message || error);
   }
 
-  server.close(() => {
-    process.exit(0);
-  });
-
+  server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-/* =============== RUN BOT =============== */
+process.on("unhandledRejection", (error) => {
+  console.error("Unhandled rejection:", error);
+});
 
-startBot();
+/* =============== RUN =============== */
+
+console.log(`Starting ${BOT_NAME}...`);
+console.log(`AI model: ${AI_MODEL}`);
+
+void startBot();
