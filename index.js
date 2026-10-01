@@ -1,4 +1,3 @@
-
 import "dotenv/config";
 import http from "http";
 import fs from "fs";
@@ -27,8 +26,6 @@ const PHONE_NUMBER = String(process.env.PHONE_NUMBER || "")
 
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
 
-const logger = pino({ level: "silent" });
-
 if (!PHONE_NUMBER || !GEMINI_API_KEY) {
   console.error("ERROR: Set PHONE_NUMBER and GEMINI_API_KEY.");
   process.exit(1);
@@ -38,12 +35,15 @@ const geminiAI = new GoogleGenAI({
   apiKey: GEMINI_API_KEY
 });
 
+const logger = pino({ level: "silent" });
+
 /* =============== HTTP SERVER =============== */
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8"
   });
+
   res.end(`${BOT_NAME} is running.`);
 });
 
@@ -56,15 +56,28 @@ server.listen(PORT, "0.0.0.0", () => {
 const SYSTEM_PROMPT = `
 You are ${BOT_NAME}, a helpful WhatsApp AI assistant.
 
-Reply in the same language as the user.
-Reply in Bengali when the user writes Bengali.
-Help with questions, education, mathematics, translation,
-programming, social media posts, captions, stories, poems,
-and original song lyrics.
-Be respectful, clear, and helpful.
-Do not claim to perform actions you did not perform.
+IMPORTANT RESPONSE STYLE:
+- Keep answers very short, preferably 1-3 sentences.
+- Answer directly without unnecessary explanations.
+- Use simple, natural language.
+- Give longer answers only when the user explicitly asks.
+- For simple questions, answer in one sentence when possible.
+- Reply in the same language as the user.
+- If the user writes Bengali, reply in Bengali.
+
+You can help with:
+- General questions and conversations.
+- Education, mathematics and translations.
+- Programming and technology.
+- Social media posts and captions.
+- Original stories, poems and song lyrics.
+
+Be respectful, clear and accurate.
+Never claim to have performed actions you did not perform.
 Do not reproduce copyrighted song lyrics on request.
 `;
+
+/* =============== GEMINI AI =============== */
 
 async function askAI(prompt) {
   const result = await geminiAI.models.generateContent({
@@ -72,8 +85,8 @@ async function askAI(prompt) {
     contents: prompt,
     config: {
       systemInstruction: SYSTEM_PROMPT,
-      temperature: 0.7,
-      maxOutputTokens: 1500
+      temperature: 0.5,
+      maxOutputTokens: 250
     }
   });
 
@@ -131,6 +144,7 @@ async function startBot() {
     });
 
     activeSocket = sock;
+
     sock.ev.on("creds.update", saveCreds);
 
     /* =============== CONNECTION EVENTS =============== */
@@ -180,6 +194,9 @@ async function startBot() {
 
       void (async () => {
         try {
+          console.log("WhatsApp is not linked yet.");
+          console.log("Preparing pairing code...");
+
           await new Promise(resolve => setTimeout(resolve, 3000));
 
           if (shuttingDown || activeSocket !== sock) return;
@@ -191,14 +208,15 @@ async function startBot() {
           console.log("WHATSAPP PAIRING CODE");
           console.log(code);
           console.log("==============================");
+          console.log("On your phone:");
           console.log("WhatsApp > Linked Devices");
           console.log("Link a device > Link with phone number");
-          console.log("Enter the code above.");
+          console.log("Enter the code shown above.");
           console.log("==============================\n");
         } catch (error) {
           console.error(
             "Pairing error:",
-            error?.message || "Unknown error"
+            error?.message || error
           );
         }
       })();
@@ -221,6 +239,7 @@ async function startBot() {
 
           let message = msg.message;
 
+          // Unwrap supported WhatsApp message wrappers.
           while (
             message?.ephemeralMessage?.message ||
             message?.viewOnceMessage?.message ||
@@ -249,6 +268,34 @@ async function startBot() {
           const lowerText = text.toLowerCase();
           const aiCommand = `${PREFIX}ai`;
           const askCommand = `${PREFIX}ask`;
+          const helpCommand = `${PREFIX}help`;
+          const menuCommand = `${PREFIX}menu`;
+
+          /* =============== HELP MENU =============== */
+
+          if (
+            lowerText === helpCommand.toLowerCase() ||
+            lowerText === menuCommand.toLowerCase()
+          ) {
+            await sock.sendMessage(
+              jid,
+              {
+                text:
+                  `🤖 *${BOT_NAME}*\n\n` +
+                  `• ${PREFIX}ai প্রশ্ন\n` +
+                  `• ${PREFIX}ask প্রশ্ন\n` +
+                  `• ${PREFIX}help\n\n` +
+                  "উদাহরণ:\n" +
+                  `${PREFIX}ai তুমি কে?\n\n` +
+                  "AI উত্তর সংক্ষিপ্ত রাখার চেষ্টা করবে।"
+              },
+              { quoted: msg }
+            );
+
+            continue;
+          }
+
+          /* =============== COMMAND CHECK =============== */
 
           const isAICommand =
             lowerText === aiCommand.toLowerCase() ||
@@ -262,7 +309,7 @@ async function startBot() {
               `${askCommand} `.toLowerCase()
             );
 
-          // Ignore every message that does not use an AI command.
+          // Only /ai or /ask messages trigger the AI.
           if (!isAICommand && !isAskCommand) continue;
 
           const command = isAICommand ? aiCommand : askCommand;
@@ -273,16 +320,17 @@ async function startBot() {
               jid,
               {
                 text:
-                  `প্রশ্ন লিখো।\n\n` +
-                  `উদাহরণ: ${PREFIX}ai তুমি কে?\n` +
-                  `অথবা: ${PREFIX}ask বাংলাদেশের রাজধানী কী?`
+                  `প্রশ্ন লিখো। উদাহরণ:\n` +
+                  `${PREFIX}ai তুমি কে?`
               },
               { quoted: msg }
             );
+
             continue;
           }
 
           console.log(`[AI REQUEST] ${jid}`);
+
           await sock.sendPresenceUpdate("composing", jid);
 
           let answer;
@@ -292,23 +340,25 @@ async function startBot() {
           } catch (error) {
             console.error(
               "[GEMINI ERROR]",
-              error?.message || "Unknown error"
+              error?.message || error
             );
 
             answer =
-              "দুঃখিত, AI সেবা এখন কাজ করছে না। " +
-              "কিছুক্ষণ পরে আবার চেষ্টা করো।";
+              "দুঃখিত, AI এখন কাজ করছে না। একটু পরে আবার চেষ্টা করো।";
           }
 
           if (activeSocket !== sock) continue;
 
           await sock.sendMessage(
             jid,
-            { text: String(answer).slice(0, 12000) },
+            {
+              text: String(answer).slice(0, 12000)
+            },
             { quoted: msg }
           );
 
           await sock.sendPresenceUpdate("paused", jid);
+
           console.log(`[AI REPLIED] ${jid}`);
 
         } catch (error) {
@@ -325,6 +375,7 @@ async function startBot() {
       "Bot startup error:",
       error?.message || error
     );
+
     scheduleReconnect();
   } finally {
     starting = false;
@@ -337,6 +388,7 @@ async function shutdown(signal) {
   if (shuttingDown) return;
 
   shuttingDown = true;
+
   console.log(`Received ${signal}. Shutting down...`);
 
   if (reconnectTimer) {
@@ -354,8 +406,11 @@ async function shutdown(signal) {
   }
 
   server.close(() => process.exit(0));
+
   setTimeout(() => process.exit(0), 3000).unref();
 }
+
+/* =============== PROCESS EVENTS =============== */
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
@@ -367,7 +422,7 @@ process.on("unhandledRejection", (error) => {
   );
 });
 
-/* =============== RUN =============== */
+/* =============== RUN BOT =============== */
 
 console.log(`Starting ${BOT_NAME}...`);
 console.log(`AI model: ${AI_MODEL}`);
